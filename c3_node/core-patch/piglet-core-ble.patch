@@ -1,0 +1,106 @@
+diff --git a/Arduino Files/Piglet/MeshNode.cpp b/Arduino Files/Piglet/MeshNode.cpp
+index cf923ec..ec1bcb9 100644
+--- a/Arduino Files/Piglet/MeshNode.cpp	
++++ b/Arduino Files/Piglet/MeshNode.cpp	
+@@ -457,7 +457,7 @@ static void coreSendHeartbeatToAll() {
+ }
+ 
+ static void coreParseAndLogText(const char* line) {
+-  // JCMK format: BSSID,SSID,AUTH,CHANNEL,RSSI,W
++  // JCMK format: BSSID,SSID,AUTH,CHANNEL,RSSI,TYPE  (TYPE: W = Wi-Fi, B = BLE)
+   String s(line);
+   int p0 = s.indexOf(',');                if (p0 < 0) return;
+   int p1 = s.indexOf(',', p0 + 1);       if (p1 < 0) return;
+@@ -469,6 +469,7 @@ static void coreParseAndLogText(const char* line) {
+   String auth  = s.substring(p1 + 1, p2);
+   int    ch    = s.substring(p2 + 1, p3).toInt();
+   int    rssi  = s.substring(p3 + 1).toInt();  // toInt() stops at next comma
++  bool   ble   = s.substring(s.lastIndexOf(',') + 1) == "B";  // type is always the last field
+ 
+   double lat = 0, lon = 0, altM = 0, accM = 0;
+   if (gpsHasFix) {
+@@ -477,7 +478,8 @@ static void coreParseAndLogText(const char* line) {
+     altM = gps.altitude.meters();
+     accM = gps.hdop.hdop();
+   }
+-  appendWigleRow(bssid, ssid, auth, iso8601NowUTC(), ch, rssi, lat, lon, altM, accM);
++  appendWigleRow(bssid, ssid, auth, iso8601NowUTC(), ch, rssi, lat, lon, altM, accM,
++                 ble ? "BLE" : "WIFI");
+   coreRecordsRx++;
+ }
+ 
+diff --git a/Arduino Files/Piglet/SDUtils.cpp b/Arduino Files/Piglet/SDUtils.cpp
+index 34da19b..d982478 100644
+--- a/Arduino Files/Piglet/SDUtils.cpp	
++++ b/Arduino Files/Piglet/SDUtils.cpp	
+@@ -233,7 +233,8 @@ void closeLogFile() {
+ 
+ void appendWigleRow(const String& mac, const String& ssid, const String& auth,
+                     const String& firstSeen, int channel, int rssi,
+-                    double lat, double lon, double altM, double accM) {
++                    double lat, double lon, double altM, double accM,
++                    const char* type) {
+   if (!sdOk || !logFile) return;
+ 
+   // Rotate CSV before it exceeds the WDGoWars 15 MB upload limit
+@@ -264,7 +265,7 @@ void appendWigleRow(const String& mac, const String& ssid, const String& auth,
+   line += String(lon, 6); line += ",";
+   line += String(altM, 1); line += ",";
+   line += String(accM, 1); line += ",";
+-  line += ",,WIFI"; // RCOIs (empty), MfgrId (empty), Type
++  line += ",,"; line += type; // RCOIs (empty), MfgrId (empty), Type (WIFI / BLE)
+ 
+   size_t written = logFile.println(line);
+   csvRowCount++;
+diff --git a/Arduino Files/Piglet/SDUtils.h b/Arduino Files/Piglet/SDUtils.h
+index 6f1dafc..27a5c39 100644
+--- a/Arduino Files/Piglet/SDUtils.h	
++++ b/Arduino Files/Piglet/SDUtils.h	
+@@ -5,7 +5,8 @@ bool   openLogFile();
+ void   closeLogFile();
+ void   appendWigleRow(const String& mac, const String& ssid, const String& auth,
+                       const String& firstSeen, int channel, int rssi,
+-                      double lat, double lon, double altM, double accM);
++                      double lat, double lon, double altM, double accM,
++                      const char* type = "WIFI");
+ 
+ String normalizeSdPath(const char* dir, const char* nameIn);
+ String pathBasename(const String& p);
+diff --git a/TDongleC5_Piglet/TDongleC5_Piglet.ino b/TDongleC5_Piglet/TDongleC5_Piglet.ino
+index 7d5e6ec..d52ca1e 100644
+--- a/TDongleC5_Piglet/TDongleC5_Piglet.ino
++++ b/TDongleC5_Piglet/TDongleC5_Piglet.ino
+@@ -544,7 +544,8 @@ static bool openLogFile() {
+ 
+ static void appendWigleRow(const String& mac, const String& ssid, const String& auth,
+                            const String& firstSeen, int channel, int rssi,
+-                           double lat, double lon, double altM, double accM) {
++                           double lat, double lon, double altM, double accM,
++                           const char* type = "WIFI") {
+   if (!sdOk || !logFile) return;
+ 
+   // Rotate CSV before it exceeds the WDGoWars 15 MB upload limit
+@@ -575,7 +576,7 @@ static void appendWigleRow(const String& mac, const String& ssid, const String&
+   line += String(lon, 6); line += ",";
+   line += String(altM, 1); line += ",";
+   line += String(accM, 1); line += ",";
+-  line += ",,WIFI"; // RCOIs (empty), MfgrId (empty), Type
++  line += ",,"; line += type; // RCOIs (empty), MfgrId (empty), Type (WIFI / BLE)
+ 
+   digitalWrite(PINS.tft_cs, HIGH);
+   size_t written = logFile.println(line);
+@@ -2256,11 +2257,13 @@ static void coreParseAndLogText(const char* line) {
+   String bssid=s.substring(0,p0), ssid=s.substring(p0+1,p1);
+   String auth=s.substring(p1+1,p2);
+   int ch=s.substring(p2+1,p3).toInt(), rssi=s.substring(p3+1).toInt();
++  bool ble = s.substring(s.lastIndexOf(',')+1) == "B";  // last field: W = Wi-Fi, B = BLE
+   double lat=0, lon=0, altM=0, accM=0;
+   if (gpsHasFix) { lat=gps.location.lat(); lon=gps.location.lng();
+                    altM=gps.altitude.meters(); accM=gps.hdop.hdop(); }
+   digitalWrite(PINS.tft_cs, HIGH);
+-  appendWigleRow(bssid, ssid, auth, iso8601NowUTC(), ch, rssi, lat, lon, altM, accM);
++  appendWigleRow(bssid, ssid, auth, iso8601NowUTC(), ch, rssi, lat, lon, altM, accM,
++                 ble ? "BLE" : "WIFI");
+   coreRecordsRx++;
+ }
+ 

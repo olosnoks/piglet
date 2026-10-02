@@ -1,0 +1,154 @@
+#include "Scanner.h"
+#include "Globals.h"
+#include "Config.h"
+#include "GPS.h"
+#include "SDUtils.h"
+#include "ScreenTelemetry.h"
+#include "SessionStats.h"
+#include "MeshNode.h"
+
+static String authModeToString(wifi_auth_mode_t m) {
+  switch (m) {
+    case WIFI_AUTH_OPEN: return "OPEN";
+    case WIFI_AUTH_WEP: return "WEP";
+    case WIFI_AUTH_WPA_PSK: return "WPA";
+    case WIFI_AUTH_WPA2_PSK: return "WPA2";
+    case WIFI_AUTH_WPA_WPA2_PSK: return "WPAWPA2";
+    case WIFI_AUTH_WPA2_ENTERPRISE: return "WPA2EAP";
+    case WIFI_AUTH_WPA3_PSK: return "WPA3";
+    case WIFI_AUTH_WPA2_WPA3_PSK: return "WPA2WPA3";
+    default: return "UNKNOWN";
+  }
+}
+
+// Last-known GPS position — used when fix is temporarily lost so networks
+// aren't logged at 0,0 (null island).
+// Updated every loop() iteration (not just on scan) so position stays current
+// even when driving through areas with no networks.
+// Quality-gated: requires HDOP ≤ 10 and ≥ 3 satellites to prevent a brief
+// low-quality re-acquisition from overwriting a good cached position.
+bool     lastGpsValid   = false;
+double   lastLat = 0, lastLon = 0, lastAlt = 0, lastAcc = 0;
+uint32_t lastGpsValidMs = 0;          // millis() when position was last cached
+const uint32_t GPS_CACHE_MAX_MS = 180000UL;  // discard cache after 3 min
+
+// ---- Result processor (shared between sync and async paths) ----
+static void processScanResults(int n) {
+  if (n <= 0) { screenTelemetryScanComplete(n, 0); WiFi.scanDelete(); biscuitReporterFlush(); return; }
+
+  String firstSeen = iso8601NowUTC();
+  double lat = 0, lon = 0, altM = 0, accM = 0;
+  if (gpsHasFix) {
+    lat  = gps.location.lat();
+    lon  = gps.location.lng();
+    altM = gps.altitude.isValid() ? gps.altitude.meters() : 0.0;
+    accM = gps.hdop.isValid()     ? gps.hdop.hdop()       : 0.0;
+    // lastLat/lastLon is maintained by loop() — no update here.
+  } else if (lastGpsValid && (millis() - lastGpsValidMs) <= GPS_CACHE_MAX_MS) {
+    // Use last-known position (quality-gated, 3-min expiry) until fix returns
+    lat = lastLat; lon = lastLon; altM = lastAlt; accM = lastAcc;
+  }
+
+  uint32_t wrote = 0;
+  for (int i = 0; i < n; i++) {
+    int ch = WiFi.channel(i);
+    bool chUnknown = (ch == 0);
+    bool is2g = (ch >= 1 && ch <= 14) || chUnknown;
+    bool is5g = (ch >= 32 && ch <= 177);
+
+    if (is2g) {
+      if (!cfg.scan24) continue;          // 2.4 GHz logging disabled
+    } else {
+      if (!is5g) continue;
+      if (!cfg.scan5 || !wardriverIsC5()) continue;  // 5 GHz off or unsupported
+    }
+
+    String ssid   = WiFi.SSID(i);
+    String mac    = WiFi.BSSIDstr(i);
+    int    rssi   = WiFi.RSSI(i);
+    String authStr = authModeToString(WiFi.encryptionType(i));
+
+    if (is2g) networksFound2G++;
+    else      networksFound5G++;
+
+    statsRecordWifiAuth(WiFi.encryptionType(i));
+    screenTelemetryObserve(ssid, mac, rssi, ch);
+
+    appendWigleRow(mac, ssid, authStr, firstSeen, ch, rssi, lat, lon, altM, accM);
+    biscuitForwardNetwork(mac, ssid, authStr, ch, rssi);
+    wrote++;
+  }
+
+  WiFi.scanDelete();
+
+  // Force flush after each scan batch so data reaches the SD card promptly.
+  // Minimises data loss if the device loses power between scan cycles.
+  if (wrote > 0 && sdOk && logFile) logFile.flush();
+
+  screenTelemetryScanComplete(n, wrote);
+  Serial.printf("[SCAN] Wrote %lu rows\n", (unsigned long)wrote);
+
+  // Radio is idle here — safe point to hop to ch 6 and report as a biscuit.
+  biscuitReporterFlush();
+}
+
+void doScanOnce() {
+  static uint32_t lastScanStartMs  = 0;
+  static bool     scanInProgress   = false;
+  static uint8_t  zeroScanCount    = 0;
+
+  // ---- Timing ----
+  // aggressive:  100 ms/channel dwell, 1500 ms minimum gap between scan starts
+  // powersaving: 200 ms/channel dwell, 10000 ms gap
+  //
+  // With 100 ms/channel the hardware finishes a 13-channel 2.4 GHz sweep in
+  // ~1.3 s instead of the old ~3.9 s (default 300 ms dwell).  Using async
+  // mode means that time no longer blocks the main loop — GPS parsing, the
+  // web server and OLED updates all continue while the radio hops channels.
+  bool powersave     = (cfg.scanMode == "powersaving");
+  uint32_t gapMs     = powersave ? 10000 : 1500;
+  uint32_t dwellMs   = powersave ?   200 :  100;
+
+  // ---- Check if the async scan launched last iteration has finished ----
+  if (scanInProgress) {
+    int n = WiFi.scanComplete();
+    if (n == WIFI_SCAN_RUNNING) return;  // still running — come back next tick
+
+    scanInProgress = false;
+    lastScanStartMs = millis();
+
+    if (n == WIFI_SCAN_FAILED || n < 0) {
+      WiFi.scanDelete();
+      zeroScanCount++;
+      Serial.printf("[SCAN] Failed/empty (%u)\n", zeroScanCount);
+      if (zeroScanCount >= 3) {
+        Serial.println("[SCAN] Resetting WiFi radio (stuck recovery)");
+        WiFi.mode(WIFI_OFF); delay(200);
+        WiFi.mode(WIFI_STA); delay(200);
+        zeroScanCount = 0;
+      }
+      return;
+    }
+
+    zeroScanCount = 0;
+    Serial.printf("[SCAN] Async complete: %d networks\n", n);
+    processScanResults(n);
+    return;
+  }
+
+  // ---- Wait for the minimum gap before starting the next scan ----
+  if (millis() - lastScanStartMs < gapMs) return;
+
+  // ---- Kick off a new async scan ----
+  // async=true, show_hidden=true, passive=false, max_ms_per_chan=dwellMs
+  int16_t rc = WiFi.scanNetworks(/*async*/true, /*show_hidden*/true,
+                                 /*passive*/false, dwellMs);
+  if (rc == WIFI_SCAN_RUNNING || rc == 0) {
+    scanInProgress = true;
+    Serial.printf("[SCAN] Async scan started (dwell=%lu ms)\n", (unsigned long)dwellMs);
+  } else {
+    // Shouldn’t normally happen; fall back and retry after gap
+    Serial.printf("[SCAN] scanNetworks start failed (%d)\n", rc);
+    lastScanStartMs = millis();
+  }
+}
