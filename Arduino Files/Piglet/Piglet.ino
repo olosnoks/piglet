@@ -35,6 +35,7 @@
 #include "WigleUpload.h"
 #include "WebUI.h"
 #include "MeshNode.h"
+#include "PigWorld.h"
 
 // -------- Battery Test (uncomment to enable) --------
 #include "battery_test.h"
@@ -175,7 +176,9 @@ static void pollButton() {
 
   // Evaluate click count after double-press window expires
   if (clickCount > 0 && (millis() - firstClickMs) > DOUBLE_PRESS_MS) {
-    if (clickCount >= 3 && currentPage == 4) {
+    if (clickCount >= 2 && pigWorldActive()) {
+      pigWorldCelebrate();  // Double press in the PigWorld view -> fireworks
+    } else if (clickCount >= 3 && currentPage == 4) {
       sasquatchStart();
     } else if (clickCount == 2 && currentPage == 4) {
       pigTwerkStart();
@@ -184,6 +187,8 @@ static void pollButton() {
       statusPagePaused = !statusPagePaused;
       Serial.print("[BTN] Double press -> status page scan ");
       Serial.println(statusPagePaused ? "PAUSED" : "RESUMED");
+    } else if (pigWorldTakePress()) {
+      // Single press on the Pig or Mesh page: show the PigWorld view first (see PigWorld.h)
     } else {
       // Single press -> cycle page (once, regardless of extra clicks)
       uint8_t oldPage = currentPage;
@@ -683,7 +688,9 @@ void loop() {
 
   // OLED refresh
   static uint32_t lastOled = 0;
-  if (currentPage == 4) {
+  if (pigWorldActive()) {
+    pigWorldTick();  // PigWorld view on the Pig/Mesh page (paces itself at 20 fps)
+  } else if (currentPage == 4) {
     // Pig page: animation runs at its own framerate (~90ms)
     pigAnimTick();
   } else if (millis() - lastOled > 500) {

@@ -74,7 +74,7 @@ inline float pulse01(uint32_t periodMs) {
   return x < 0.5f ? x * 2.0f : (1.0f - x) * 2.0f;
 }
 
-inline void fillVGrad(TFT_eSprite& s, int x, int y, int w, int h, uint16_t ctop, uint16_t cbot) {
+inline void fillVGrad(GfxSprite& s, int x, int y, int w, int h, uint16_t ctop, uint16_t cbot) {
   const int d = (h > 1) ? h - 1 : 1;
   for (int i = 0; i < h; ++i) s.drawFastHLine(x, y + i, w, lerp565(ctop, cbot, (float)i / d));
 }
@@ -256,20 +256,42 @@ const char* const BOTTOM_KEYS[6] = {nullptr, "SPACE", "DEL", "CLR", "ESC", "OK"}
 ScreenUI screenUI;
 
 void ScreenUI::begin() {
+#if !defined(BOARD_W550)
   pinMode(BoardPins::BACKLIGHT_PIN, OUTPUT);
   digitalWrite(BoardPins::BACKLIGHT_PIN, HIGH);
+#endif
 
   tft.init();
   tft.setRotation(0);
   tft.setTextWrap(false);
 
   frame.setColorDepth(16);
+#if defined(BOARD_W550)
+  frame.setPsram(true);
+  tft.setBrightness(255);
+  tft.fillScreen(C_BG);  // paint the side margins once; present() only redraws the center
+#else
   frame.setAttribute(PSRAM_ENABLE, true);
+#endif
   spriteReady = frame.createSprite(SCREEN_W, SCREEN_H) != nullptr;
 
-  touch.begin();
+#if !defined(BOARD_W550)
+  touch.begin();  // W550 touch (GT911) is initialized by LovyanGFX in tft.init()
+#endif
   showSplash();
   redraw = true;
+}
+
+void ScreenUI::present() {
+#if defined(BOARD_W550)
+  // The UI renders into a 240x320 portrait sprite. Scale it x1.5 to 360x480 and
+  // center it on the 800x480 landscape panel. Phase 2 (native landscape layout)
+  // can drop this and draw directly at panel resolution.
+  frame.setPivot(SCREEN_W * 0.5f, SCREEN_H * 0.5f);
+  frame.pushRotateZoom(&tft, tft.width() * 0.5f, tft.height() * 0.5f, 0.0f, 1.5f, 1.5f);
+#else
+  frame.pushSprite(0, 0);
+#endif
 }
 
 void ScreenUI::showSplash() {
@@ -361,7 +383,7 @@ void ScreenUI::showSplash() {
     frame.drawRoundRect(29, 300, 182, 8, 3, C_BORDER);
     if (barW > 2) fillVGrad(frame, 30, 301, barW, 6, lerp565(C_ACCENT, C_BLUE, 0.4f), C_ACCENT);
 
-    frame.pushSprite(0, 0);
+    present();
     delay(24);
   }
   frame.setTextDatum(TL_DATUM);
@@ -391,7 +413,29 @@ void ScreenUI::update(float speedValue) {
 }
 
 void ScreenUI::handleTouch() {
+#if defined(BOARD_W550)
+  // GT911 is driven by LovyanGFX in physical 800x480 panel space. The UI logic
+  // below works in the 240x320 sprite space, so invert the present() transform:
+  // the sprite is drawn centered and scaled x1.5 (360x480) on the panel.
+  TouchPoint point;
+  {
+    int32_t px = 0, py = 0;
+    if (tft.getTouch(&px, &py)) {
+      constexpr float kScale = 1.5f;
+      const int originX = (tft.width()  - int(SCREEN_W * kScale)) / 2;  // 220
+      const int originY = (tft.height() - int(SCREEN_H * kScale)) / 2;  // 0
+      const int sx = int((px - originX) / kScale);
+      const int sy = int((py - originY) / kScale);
+      if (sx >= 0 && sx < SCREEN_W && sy >= 0 && sy < SCREEN_H) {
+        point.pressed = true;
+        point.x = sx;
+        point.y = sy;
+      }
+    }
+  }
+#else
   const TouchPoint point = touch.read();
+#endif
 
   if (point.pressed) {
     if (!touchActive) {
@@ -679,7 +723,7 @@ void ScreenUI::handleSystemTap(int16_t x, int16_t contentY) {
       frame.setTextDatum(MC_DATUM);
       frame.setTextColor(C_TEXT, C_BG);
       frame.drawString("REBOOTING", 120, 160, 2);
-      frame.pushSprite(0, 0);
+      present();
       delay(200);
       ESP.restart();
     }
@@ -879,12 +923,12 @@ void ScreenUI::draw() {
   frame.fillSprite(C_BG);
   frame.setTextSize(1);
 
-  if (editing) { drawEditor(); frame.pushSprite(0, 0); return; }
-  if (speedoMode) { drawSpeedo(); frame.pushSprite(0, 0); return; }
+  if (editing) { drawEditor(); present(); return; }
+  if (speedoMode) { drawSpeedo(); present(); return; }
 
   drawHeader();
 
-  frame.setViewport(0, HEADER_H, SCREEN_W, CONTENT_H, true);
+  frame.setViewport(0, HEADER_H, SCREEN_W, CONTENT_H);
   frame.fillRect(0, 0, SCREEN_W, CONTENT_H, C_BG);
 
   switch (page) {
@@ -898,7 +942,7 @@ void ScreenUI::draw() {
   drawScrollbar(contentHeightForPage());
   frame.resetViewport();
   drawFooter();
-  frame.pushSprite(0, 0);
+  present();
 }
 // Scalable pig face centered at (cx,cy) with head radius R.
 void ScreenUI::drawPigFace(int cx, int cy, int R) {
@@ -1594,7 +1638,7 @@ void ScreenUI::uploadLogsViaHome() {
       frame.setTextColor(C_MUTED, C_BG);
       frame.drawString(l2, 120, 178, 2);
     }
-    frame.pushSprite(0, 0);
+    present();
     frame.setTextDatum(TL_DATUM);
   };
 

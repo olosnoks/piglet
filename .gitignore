@@ -4,3 +4,4 @@
 *.ZIP
 AGENTS.md
 tools/
+.pio/

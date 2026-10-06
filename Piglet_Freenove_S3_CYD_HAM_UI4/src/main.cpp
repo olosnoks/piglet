@@ -15,6 +15,7 @@
 #include "HashcatWriter.h"
 #include "PmkidCapture.h"
 #include "BoardPins.h"
+#include "StorageCompat.h"
 #include "Globals.h"
 #include "Config.h"
 #include "GPS.h"
@@ -30,7 +31,33 @@
 #include "BleScanner.h"
 #include "SessionStats.h"
 
-static bool initSdMmc() {
+#if defined(BOARD_W550)
+#include <SPI.h>
+static SPIClass sdSpi(HSPI);
+
+static bool initSd() {
+  // Guition JC8048W550: onboard TF slot wired for SPI on GPIO 10/11/12/13.
+  sdSpi.begin(BoardPins::SD_SCK, BoardPins::SD_MISO, BoardPins::SD_MOSI, BoardPins::SD_CS);
+
+  if (!SD.begin(BoardPins::SD_CS, sdSpi, 20000000)) {
+    Serial.println("[SD] SD (SPI) mount failed");
+    return false;
+  }
+
+  if (SD.cardType() == CARD_NONE) {
+    Serial.println("[SD] No card detected");
+    return false;
+  }
+
+  Serial.printf(
+      "[SD] %llu MB total, %llu MB used\n",
+      SD.totalBytes() / (1024ULL * 1024ULL),
+      SD.usedBytes() / (1024ULL * 1024ULL));
+
+  return true;
+}
+#else
+static bool initSd() {
   if (!SD_MMC.setPins(
           BoardPins::SD_CLK,
           BoardPins::SD_CMD,
@@ -59,6 +86,7 @@ static bool initSdMmc() {
 
   return true;
 }
+#endif
 
 static void updateGpsState() {
   while (GPSSerial.available()) {
@@ -185,7 +213,7 @@ void setup() {
   networksFound2G = 0;
   networksFound5G = 0;
 
-  sdOk = initSdMmc();
+  sdOk = initSd();
 
   if (sdOk) {
     loadConfigFromSD();

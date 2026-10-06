@@ -1,7 +1,7 @@
 #pragma once
 
 #include <Arduino.h>
-#include <TFT_eSPI.h>
+#include "Gfx.h"
 #include "MarauderTools.h"
 #include "BleSpam.h"
 #include "RawCapture.h"
@@ -156,9 +156,11 @@ private:
 
   void uploadLogsViaHome();  // FILE screen: connect to home Wi-Fi + upload all CSVs
 
-  TFT_eSPI tft;
-  TFT_eSprite frame{&tft};
+  GfxDevice tft;
+  GfxSprite frame{&tft};
   FT6336Touch touch;
+
+  void present();  // blit the 240x320 frame to the physical panel
 
   Page page = Page::Home;
   int scroll[PAGE_N] = {};
