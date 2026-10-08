@@ -103,8 +103,10 @@ static void onPageChange(uint8_t oldPage, uint8_t newPage) {
     pig.phase = 0;
   }
 
-  // Mesh node page lifecycle — always enter as Node; long-press activates Core
-  if (newPage == 5) enterNodeMode();
+  // Mesh node page lifecycle — always enter as Node; long-press activates Core.
+  // Skip if a mesh role is already live (the PigWorld scene may have started a Node
+  // on the Pig page); enterNodeMode() re-inits WiFi and would zero the counters.
+  if (newPage == 5 && !meshNodeActive && !meshCoreActive) enterNodeMode();
   if (oldPage == 5) {
     if (meshCoreActive) exitCoreMode();
     else                exitNodeMode();
@@ -188,7 +190,11 @@ static void pollButton() {
       Serial.print("[BTN] Double press -> status page scan ");
       Serial.println(statusPagePaused ? "PAUSED" : "RESUMED");
     } else if (pigWorldTakePress()) {
-      // Single press on the Pig or Mesh page: show the PigWorld view first (see PigWorld.h)
+      // Single press on the Pig or Mesh page: show the PigWorld view first (see PigWorld.h).
+      // Opening the scene turns the Piglet into a mesh Node, and it stays a Node until you
+      // leave the page (onPageChange exits on the way out of page 5). Skip if a mesh role
+      // is already live — enterNodeMode() re-inits WiFi and zeroes the counters.
+      if (!meshNodeActive && !meshCoreActive) enterNodeMode();
     } else {
       // Single press -> cycle page (once, regardless of extra clicks)
       uint8_t oldPage = currentPage;
@@ -708,10 +714,13 @@ void loop() {
   wdgwarsServicePendingJobs();
 
   // Scanning – page-aware logic
-  // Mesh node page handles its own scan via nodeModeTick(); skip normal path.
-  if (currentPage == 5) {
-    if (meshCoreActive) coreModeTick();
-    else                nodeModeTick();
+  // A live mesh role handles its own scan via node/coreModeTick(). This is page 5, and
+  // now also the PigWorld scene Node started on the Pig page — so key off the role flags
+  // rather than the page number, and fall through to the normal scan path otherwise.
+  if (meshCoreActive) {
+    coreModeTick();
+  } else if (meshNodeActive) {
+    nodeModeTick();
   } else {
     autoPaused = shouldPauseScanning();
     wifi_mode_t m = WiFi.getMode();

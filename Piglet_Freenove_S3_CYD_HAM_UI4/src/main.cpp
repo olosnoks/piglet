@@ -357,6 +357,8 @@ void loop() {
                            sdOk &&
                            !statusPagePaused &&
                            !apActive &&
+                           !meshCoreActive &&   // Core only logs node records — never scans APs itself
+                           !meshNodeActive &&   // Node scans via nodeModeTick(), not the solo scanner
                            (userScanOverride || !autoPaused);
 
     allowScanForOled = allowScan;
