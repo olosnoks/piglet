@@ -1,0 +1,63 @@
+name: Deploy web flasher
+
+# Publishes the ESP Web Tools flasher in web-flasher/ to GitHub Pages.
+#
+# The flasher serves firmware straight from this repo's *latest release*
+# (releases/latest/download/*.ino.merged.bin), so there is nothing to compile
+# here — this workflow only stamps a build string and uploads the static site.
+#
+# Runs when web-flasher/ changes on the default branch, when a release is
+# published (so the "build" stamp refreshes), and on manual dispatch. The first
+# run turns Pages on automatically — no Settings toggle needed.
+
+on:
+  push:
+    branches: [main]
+    paths: ['web-flasher/**', '.github/workflows/deploy-web-flasher.yml']
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One deploy at a time; let a newer run supersede an in-flight one.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Build site & deploy Pages
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Stamp build version
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME}+${GITHUB_SHA::7}"
+          echo "Stamping version: $VERSION"
+          # Replace __VERSION__ in the page and any manifests that use it.
+          find web-flasher -name '*.json' -o -name 'index.html' | while read -r f; do
+            sed -i "s|__VERSION__|${VERSION}|g" "$f"
+          done
+
+      - uses: actions/configure-pages@v5
+        with:
+          # Turn Pages on (source = GitHub Actions) on the first run, so no
+          # manual toggle in Settings is needed.
+          enablement: true
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: web-flasher
+
+      - name: Deploy
+        id: deployment
+        uses: actions/deploy-pages@v4
